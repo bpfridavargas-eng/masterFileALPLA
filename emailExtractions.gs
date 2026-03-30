@@ -11,7 +11,8 @@ const XLSXS_FOLDER_ID = "1p41PUas0sKDBkQLKfdW9V3KYtAZeI1vV";
 
 // Criterio de búsqueda en Gmail. Busca en los últimos 7 días correos con adjuntos 
 // que contengan el asunto "Repro Alpla WK". Ajusta esto si el asunto cambia.
-const GMAIL_SEARCH_QUERY = 'subject:"ALPLA weekly file" has:attachment newer_than:7d';
+// Nota: Añadí "is:unread" para evitar procesar el mismo correo dos veces.
+const GMAIL_SEARCH_QUERY = 'subject:"ALPLA weekly file" has:attachment is:unread newer_than:7d';
 
 // Nombre exacto de la etiqueta (label) que ya existe en Gmail para marcar estos correos.
 const ALPLA_LABEL_NAME = "ALPLA weekly file label";
@@ -82,17 +83,92 @@ function guardarAdjuntoEnDrive() {
     }
 
     //7. Convertir de xlsx a GSheets
-    let newSheetFileID = convertXLSXtoGoogleSheets(newFile);
+    let newSheetFileID = convertXLSXtoGoogleSheets(newFile, targetFolder);
 
     //8. ETL
-    let weekNum = detectHeaders(newSheetFileID)
-
-    convertWeektoDate(weekNum);
+    // Nota: Asegúrate de tener estas funciones definidas si las vas a usar
+    // let weekNum = detectHeaders(newSheetFileID);
+    // convertWeektoDate(weekNum);
 
     //9. Add new information to the master file
-    //addNewData(newSheetFileID);
+    addNewData(newSheetFileID);
     
   } catch (e) {
     Logger.log("❌ Ocurrió un error: " + e.toString());
   }
+}
+
+// =================================================================================
+// 3. FUNCIONES DE APOYO (CONEXIÓN Y CONVERSIÓN)
+// =================================================================================
+
+/**
+ * Convierte el archivo XLSX guardado a un formato Google Sheets para poder leerlo.
+ * Requiere el servicio "Drive API" activado.
+ */
+function convertXLSXtoGoogleSheets(file, folder) {
+  const blob = file.getBlob();
+  const resource = {
+    title: file.getName().replace(/\.xlsx$/i, ""),
+    mimeType: MimeType.GOOGLE_SHEETS,
+    parents: [{id: folder.getId()}]
+  };
+  
+  // Realiza la conversión usando la API de Drive
+  const spreadsheet = Drive.Files.insert(resource, blob);
+  return spreadsheet.id;
+}
+/**
+ * Abre el archivo recién convertido y transforma los datos para el Master.
+ * Inserta los datos específicamente en la hoja "Sheet4".
+ */
+function addNewData(newSheetFileID) {
+  // 1. Abre el archivo convertido (origen)
+  const sourceSs = SpreadsheetApp.openById(newSheetFileID);
+  const sourceSheet = sourceSs.getSheets()[0];
+  const sourceData = sourceSheet.getDataRange().getValues();
+
+  if (sourceData.length < 4) {
+    Logger.log("⚠️ El archivo adjunto no tiene suficientes filas (mínimo 4 para detectar MPS).");
+    return;
+  }
+
+  // 2. Identificar hasta qué columna debemos copiar
+  // Buscamos en la fila 4 (índice 3) la palabra "MPS"
+  const row4 = sourceData[3]; 
+  let lastColIndex = -1;
+
+  // Recorremos la fila de derecha a izquierda para encontrar el ÚLTIMO "MPS"
+  // O de izquierda a derecha si prefieres el PRIMERO. Aquí busco el último:
+  for (let i = row4.length - 1; i >= 0; i--) {
+    if (String(row4[i]).toUpperCase().trim() === "MPS") {
+      lastColIndex = i;
+      break; 
+    }
+  }
+
+  if (lastColIndex === -1) {
+    Logger.log("❌ No se encontró el texto 'MPS' en la fila 4. Se copiarán todas las columnas por defecto.");
+    lastColIndex = sourceData[0].length - 1;
+  }
+
+  // 3. Recortar los datos (solo hasta la columna donde está MPS)
+  // El número de columnas a copiar es lastColIndex + 1
+  const numColsToCopy = lastColIndex + 1;
+  const filteredData = sourceData.map(row => row.slice(0, numColsToCopy));
+
+  // 4. Obtiene la hoja de destino "Sheet4"
+  const targetSs = SpreadsheetApp.getActiveSpreadsheet();
+  let masterSheet = targetSs.getSheetByName("Recibe de correo");
+
+  if (!masterSheet) {
+    Logger.log("❌ Error: No se encontró la hoja 'Sheet4'.");
+    return;
+  }
+
+  // 5. Limpiar y Pegar
+  masterSheet.clear();
+  masterSheet.getRange(1, 1, filteredData.length, filteredData[0].length).setValues(filteredData);
+
+  Logger.log(`✅ Datos integrados en Sheet4. Se recortó hasta la columna ${numColsToCopy} (MPS).`);
 }
